@@ -50,7 +50,8 @@ function loadEditor() {
   const exposed = script.replace(/\}\)\(\);\s*$/, `globalThis.editor = {
     state, els, captureEdit, recordEdit, undoEdit, removeCurrent, imageBounds,
     resizeFromHandle, snapResizedImageToArtboard, snapImageToArtboard,
-    resetImage, centerImage, handleSettingsChange, onKeyDown, finishPointerEdit
+    resetImage, centerImage, handleSettingsChange, onKeyDown, finishPointerEdit,
+    toggleEdgePixel, drawImageContent
   }; })();`);
   vm.runInNewContext(exposed, sandbox);
   return { ...sandbox.editor, revoked };
@@ -187,4 +188,37 @@ test('history is bounded and releases URLs only when restoration is impossible',
   e.state.items.push(item('upload')); e.recordEdit(before);
   e.undoEdit(); assert.ok(e.revoked.includes('blob:upload'));
   assert.ok(!e.revoked.includes('blob:kept'));
+});
+
+test('edge pixel is per image, preserves composition, and supports undo and removal recovery', () => {
+  const e = loadEditor();
+  e.state.items = [item('a'), item('b')]; e.state.currentIndex = 0;
+  const original = { ...e.state.items[0].transform };
+  e.toggleEdgePixel();
+  assert.equal(e.state.items[0].edgePixel, true);
+  assert.equal(Boolean(e.state.items[1].edgePixel), false);
+  assert.deepEqual(e.state.items[0].transform, original);
+  e.removeCurrent(); e.undoEdit();
+  assert.equal(e.state.items[0].edgePixel, true);
+  e.undoEdit();
+  assert.equal(Boolean(e.state.items[0].edgePixel), false);
+  e.state.exporting = true; e.toggleEdgePixel();
+  assert.equal(Boolean(e.state.items[0].edgePixel), false);
+});
+
+test('edge rendering extends rows, columns and corners only when enabled', () => {
+  const e = loadEditor();
+  const image = item();
+  const calls = [];
+  const out = { save() {}, restore() {}, drawImage(...args) { calls.push(args); } };
+  const art = { width: 1000, height: 800 };
+  e.drawImageContent(out, image, art);
+  assert.equal(calls.length, 1);
+  image.edgePixel = true; calls.length = 0;
+  e.drawImageContent(out, image, art);
+  assert.equal(calls.length, 9);
+  assert.deepEqual(calls[0].slice(1), [0, 0, 1, 1, 0, 0, 200, 160]);
+  assert.deepEqual(calls[1].slice(1), [0, 0, 1000, 1, 200, 0, 600, 160]);
+  assert.deepEqual(calls[7].slice(1), [999, 799, 1, 1, 800, 640, 200, 160]);
+  assert.deepEqual(calls[8].slice(1), [200, 160, 600, 480]);
 });

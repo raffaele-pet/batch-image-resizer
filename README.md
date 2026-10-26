@@ -7,6 +7,7 @@ A browser-based workspace for uploading, arranging, resizing, and exporting mult
 - upload or drag and drop multiple images
 - choose common aspect ratios or preserve the original ratio
 - resize, position, fill, fit, and center each image
+- fill empty workspace margins by extending the image's edge pixels
 - snap image edges to the workspace borders while moving or scaling
 - undo up to 50 edits, including image removal, with Ctrl+Z (Cmd+Z on Mac) or the Undo button
 - select adaptive output sizing or a fixed long edge up to 8K
@@ -30,8 +31,15 @@ view zoom. Scaling preserves proportions and keeps the opposite corner fixed.
 Hold Alt to scale from the center, or Shift to scale width and height independently;
 snapping also works with these modifiers.
 
+Click **Edge pixel**, next to Fill and Fit, to fill the space outside the current
+image by stretching its outermost pixel rows and columns, including the corners.
+The image keeps its position and scale. This toggle applies per image, updates
+as you move or scale it, and is included in JPG, PNG, and WebP exports. Click it
+again to restore the usual background. Transparency inside the source image is
+preserved.
+
 Use Ctrl+Z (Cmd+Z on Mac) or **Undo** to reverse uploads, removals, moves, scaling,
-Fill, Fit, Center, and workspace aspect ratio or output size changes. Each drag
+Fill, Fit, Edge pixel, Center, and workspace aspect ratio or output size changes. Each drag
 counts as one edit. Restoring a removed image also restores its position in the
 list and its composition. Undo history lasts for the current page session and
 keeps the latest 50 edits. Text fields retain their normal text undo behavior.

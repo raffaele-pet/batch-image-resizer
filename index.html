@@ -101,6 +101,12 @@
       background: #253a49;
     }
 
+    .button[aria-pressed="true"] {
+      border-color: var(--blue);
+      background: #20303c;
+      color: #d9efff;
+    }
+
     .button.danger {
       color: #ffadb5;
     }
@@ -560,6 +566,7 @@
       <div class="tool-group">
         <button class="button" id="fillBtn" type="button" disabled title="Fill the workspace with the image">Fill</button>
         <button class="button" id="fitImageBtn" type="button" disabled title="Fit the entire image within the workspace">Fit</button>
+        <button class="button" id="edgePixelBtn" type="button" disabled aria-pressed="false" title="Fill empty space by extending the image's edge pixels">Edge pixel</button>
         <button class="button" id="centerBtn" type="button" disabled title="Center the image without changing its scale">Center</button>
       </div>
 
@@ -658,6 +665,7 @@
         sizeSelect: document.getElementById("sizeSelect"),
         fillBtn: document.getElementById("fillBtn"),
         fitImageBtn: document.getElementById("fitImageBtn"),
+        edgePixelBtn: document.getElementById("edgePixelBtn"),
         centerBtn: document.getElementById("centerBtn"),
         zoomOutBtn: document.getElementById("zoomOutBtn"),
         zoomInBtn: document.getElementById("zoomInBtn"),
@@ -735,7 +743,7 @@
         return before.ratioText !== state.ratioText || before.sizeMode !== state.sizeMode ||
           before.items.length !== state.items.length || before.items.some((item, index) => {
             const current = state.items[index];
-            return item.id !== current.id || Object.keys(item.transform).some(
+            return item.id !== current.id || item.edgePixel !== current.edgePixel || Object.keys(item.transform).some(
               key => item.transform[key] !== current.transform[key]
             );
           });
@@ -914,6 +922,7 @@
             image,
             naturalWidth: image.naturalWidth,
             naturalHeight: image.naturalHeight,
+            edgePixel: false,
             transform: null
           };
           initTransform(item);
@@ -1196,6 +1205,18 @@
         scheduleDraw();
       }
 
+      function toggleEdgePixel() {
+        if (state.exporting) return;
+        finishPointerEdit();
+        const item = currentItem();
+        if (!item) return;
+        const before = captureEdit();
+        item.edgePixel = !item.edgePixel;
+        recordEdit(before);
+        updateUI();
+        scheduleDraw();
+      }
+
       function centerImage() {
         if (state.exporting) return;
         finishPointerEdit();
@@ -1277,6 +1298,39 @@
         ctx.restore();
       }
 
+      function drawImageContent(out, item, art, originX = 0, originY = 0, scale = 1) {
+        const b = imageBounds(item);
+        const width = item.naturalWidth;
+        const height = item.naturalHeight;
+
+        if (item.edgePixel) {
+          // Extend each outermost pixel row/column; corner pixels fill corner gaps.
+          // The source image and its transform remain unchanged.
+          const columns = [
+            { source: 0, size: 1, start: 0, length: Math.max(0, b.left) },
+            { source: 0, size: width, start: b.left, length: b.width },
+            { source: width - 1, size: 1, start: b.right, length: Math.max(0, art.width - b.right) }
+          ];
+          const rows = [
+            { source: 0, size: 1, start: 0, length: Math.max(0, b.top) },
+            { source: 0, size: height, start: b.top, length: b.height },
+            { source: height - 1, size: 1, start: b.bottom, length: Math.max(0, art.height - b.bottom) }
+          ];
+          out.save();
+          out.imageSmoothingEnabled = false;
+          rows.forEach((row, y) => columns.forEach((column, x) => {
+            if ((x === 1 && y === 1) || !column.length || !row.length) return;
+            out.drawImage(item.image, column.source, row.source, column.size, row.size,
+              originX + column.start * scale, originY + row.start * scale,
+              column.length * scale, row.length * scale);
+          }));
+          out.restore();
+        }
+
+        out.drawImage(item.image, originX + b.left * scale, originY + b.top * scale,
+          b.width * scale, b.height * scale);
+      }
+
       function draw() {
         const item = currentItem();
 
@@ -1307,15 +1361,9 @@
         ctx.rect(originX, originY, artW, artH);
         ctx.clip();
 
-        const bounds = imageBounds(item);
-        const imageX = originX + bounds.left * scale;
-        const imageY = originY + bounds.top * scale;
-        const imageW = bounds.width * scale;
-        const imageH = bounds.height * scale;
-
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = "high";
-        ctx.drawImage(item.image, imageX, imageY, imageW, imageH);
+        drawImageContent(ctx, item, art, originX, originY, scale);
         ctx.restore();
 
         ctx.save();
@@ -1649,6 +1697,8 @@
         els.undoBtn.disabled = !state.undoStack.length || state.exporting;
         els.fillBtn.disabled = !has || state.exporting;
         els.fitImageBtn.disabled = !has || state.exporting;
+        els.edgePixelBtn.disabled = !has || state.exporting;
+        els.edgePixelBtn.setAttribute("aria-pressed", String(Boolean(item?.edgePixel)));
         els.centerBtn.disabled = !has || state.exporting;
         els.exportAllTopBtn.disabled = !has || state.exporting;
         els.prevBtn.disabled = !has || state.currentIndex <= 0 || state.exporting;
@@ -1693,10 +1743,9 @@
           out.clearRect(0, 0, art.width, art.height);
         }
 
-        const b = imageBounds(item);
         out.imageSmoothingEnabled = true;
         out.imageSmoothingQuality = "high";
-        out.drawImage(item.image, b.left, b.top, b.width, b.height);
+        drawImageContent(out, item, art);
         return canvas;
       }
 
@@ -1989,6 +2038,7 @@
       els.sizeSelect.addEventListener("change", handleSettingsChange);
       els.fillBtn.addEventListener("click", () => resetImage("fill"));
       els.fitImageBtn.addEventListener("click", () => resetImage("fit"));
+      els.edgePixelBtn.addEventListener("click", toggleEdgePixel);
       els.centerBtn.addEventListener("click", centerImage);
 
       els.zoomOutBtn.addEventListener("click", () => zoomViewCenter(1 / 1.16));
