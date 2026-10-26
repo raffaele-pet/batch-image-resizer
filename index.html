@@ -523,6 +523,7 @@
 
       <button class="button primary" id="addImagesBtn" type="button">＋ Images</button>
       <button class="button danger" id="removeBtn" type="button" disabled title="Remove the current image from the list without deleting the file from your computer">Remove</button>
+      <button class="button" id="undoBtn" type="button" disabled title="Undo the last edit (Ctrl+Z / Cmd+Z)">Undo</button>
     </div>
 
     <div class="toolbar-middle">
@@ -652,6 +653,7 @@
         fileInput: document.getElementById("fileInput"),
         addImagesBtn: document.getElementById("addImagesBtn"),
         removeBtn: document.getElementById("removeBtn"),
+        undoBtn: document.getElementById("undoBtn"),
         ratioSelect: document.getElementById("ratioSelect"),
         sizeSelect: document.getElementById("sizeSelect"),
         fillBtn: document.getElementById("fillBtn"),
@@ -690,6 +692,7 @@
 
       const state = {
         items: [],
+        undoStack: [],
         currentIndex: -1,
         ratioText: els.ratioSelect.value,
         sizeMode: els.sizeSelect.value,
@@ -714,6 +717,82 @@
       const MIN_IMAGE_SIZE = 4;
       const MAX_VIEW_ZOOM = 64;
       const MIN_VIEW_ZOOM = 0.05;
+      const MAX_UNDO_STEPS = 50;
+
+      function captureEdit() {
+        return {
+          items: state.items.map(item => ({ ...item, transform: { ...item.transform } })),
+          currentIndex: state.currentIndex,
+          ratioText: state.ratioText,
+          sizeMode: state.sizeMode,
+          viewZoom: state.viewZoom,
+          viewPanX: state.viewPanX,
+          viewPanY: state.viewPanY
+        };
+      }
+
+      function editChanged(before) {
+        return before.ratioText !== state.ratioText || before.sizeMode !== state.sizeMode ||
+          before.items.length !== state.items.length || before.items.some((item, index) => {
+            const current = state.items[index];
+            return item.id !== current.id || Object.keys(item.transform).some(
+              key => item.transform[key] !== current.transform[key]
+            );
+          });
+      }
+
+      // Keep shared image resources alive while any undo step can restore them.
+      function releaseUnusedImages(previousItems) {
+        const retained = new Set([
+          ...state.items.map(item => item.url),
+          ...state.undoStack.flatMap(edit => edit.items.map(item => item.url))
+        ]);
+        for (const url of new Set(previousItems.map(item => item.url))) {
+          if (!retained.has(url)) URL.revokeObjectURL(url);
+        }
+      }
+
+      function recordEdit(before) {
+        if (!editChanged(before)) return;
+        state.undoStack.push(before);
+        if (state.undoStack.length > MAX_UNDO_STEPS) {
+          releaseUnusedImages(state.undoStack.shift().items);
+        }
+        updateUI();
+      }
+
+      function finishPointerEdit() {
+        const ptr = state.pointer;
+        if (!ptr) return;
+        try { els.canvas.releasePointerCapture(ptr.id); } catch {}
+        state.pointer = null;
+        els.canvas.classList.remove("dragging");
+        if (ptr.beforeEdit) recordEdit(ptr.beforeEdit);
+      }
+
+      function undoEdit() {
+        if (state.exporting) return;
+        finishPointerEdit();
+        const before = state.undoStack.pop();
+        if (!before) return;
+        const previousItems = state.items;
+        state.items = before.items;
+        state.currentIndex = before.currentIndex;
+        state.ratioText = before.ratioText;
+        state.sizeMode = before.sizeMode;
+        state.viewZoom = before.viewZoom;
+        state.viewPanX = before.viewPanX;
+        state.viewPanY = before.viewPanY;
+        els.ratioSelect.value = state.ratioText;
+        els.sizeSelect.value = state.sizeMode;
+        state.hoveredHandle = null;
+        els.canvas.style.cursor = "default";
+        releaseUnusedImages(previousItems);
+        buildThumbnails();
+        updateUI();
+        scheduleDraw();
+        toast("Last edit undone.");
+      }
 
       function clamp(v, min, max) {
         return Math.max(min, Math.min(max, v));
@@ -864,9 +943,13 @@
 
         if (!loaded.length) return;
 
+        finishPointerEdit();
+        const before = captureEdit();
+        loaded.forEach(initTransform);
         const wasEmpty = state.items.length === 0;
         state.items.push(...loaded);
         if (wasEmpty) state.currentIndex = 0;
+        recordEdit(before);
 
         buildThumbnails();
         fitView();
@@ -876,10 +959,12 @@
       }
 
       function removeCurrent() {
+        if (state.exporting) return;
+        finishPointerEdit();
         const item = currentItem();
         if (!item) return;
 
-        URL.revokeObjectURL(item.url);
+        const before = captureEdit();
         state.items.splice(state.currentIndex, 1);
 
         if (!state.items.length) {
@@ -887,6 +972,7 @@
         } else {
           state.currentIndex = Math.min(state.currentIndex, state.items.length - 1);
         }
+        recordEdit(before);
 
         buildThumbnails();
         fitView();
@@ -933,6 +1019,7 @@
 
       function setCurrentIndex(index) {
         if (!state.items.length) return;
+        finishPointerEdit();
         const next = clamp(index, 0, state.items.length - 1);
         if (next === state.currentIndex) return;
 
@@ -1085,8 +1172,11 @@
       }
 
       function resetImage(mode) {
+        if (state.exporting) return;
+        finishPointerEdit();
         const item = currentItem();
         if (!item) return;
+        const before = captureEdit();
         const art = getArtboardSize(item);
 
         let scale;
@@ -1100,17 +1190,22 @@
         item.transform.y = art.height / 2;
         item.transform.scaleX = scale;
         item.transform.scaleY = scale;
+        recordEdit(before);
 
         updateUI();
         scheduleDraw();
       }
 
       function centerImage() {
+        if (state.exporting) return;
+        finishPointerEdit();
         const item = currentItem();
         if (!item) return;
+        const before = captureEdit();
         const art = getArtboardSize(item);
         item.transform.x = art.width / 2;
         item.transform.y = art.height / 2;
+        recordEdit(before);
         updateUI();
         scheduleDraw();
       }
@@ -1133,6 +1228,8 @@
       }
 
       function handleSettingsChange() {
+        finishPointerEdit();
+        const before = captureEdit();
         const oldRatio = state.ratioText;
         const oldSize = state.sizeMode;
         const newRatio = els.ratioSelect.value;
@@ -1141,6 +1238,7 @@
         preserveTransformsForSettingsChange(oldRatio, oldSize, newRatio, newSize);
         state.ratioText = newRatio;
         state.sizeMode = newSize;
+        recordEdit(before);
 
         fitView();
         updateUI();
@@ -1344,6 +1442,7 @@
       }
 
       function beginPointer(event) {
+        if (state.exporting || state.pointer) return;
         if (event.button !== 0 && event.button !== 1) return;
         const item = currentItem();
         if (!item) return;
@@ -1367,6 +1466,7 @@
         state.pointer = {
           id: event.pointerId,
           mode,
+          beforeEdit: mode === "pan-view" ? null : captureEdit(),
           handle,
           startScreenX: p.x,
           startScreenY: p.y,
@@ -1420,6 +1520,7 @@
 
         if (ptr.mode === "resize") {
           resizeFromHandle(item, ptr, artP, event.altKey, event.shiftKey);
+          snapResizedImageToArtboard(item, ptr, event.altKey, event.shiftKey, view);
           scheduleDraw();
           updateUI();
         }
@@ -1455,7 +1556,7 @@
 
           const denom = vx * vx + vy * vy;
           let factor = denom > 0 ? (px * vx + py * vy) / denom : 1;
-          factor = Math.max(MIN_IMAGE_SIZE / Math.max(b0.width, b0.height), factor);
+          factor = Math.max(MIN_IMAGE_SIZE / Math.min(b0.width, b0.height), factor);
 
           const newW = Math.max(MIN_IMAGE_SIZE, b0.width * factor);
           const newH = Math.max(MIN_IMAGE_SIZE, b0.height * factor);
@@ -1494,11 +1595,46 @@
         }
       }
 
+      function snapResizedImageToArtboard(item, ptr, fromCenter, unlockProportions, view) {
+        const bounds = imageBounds(item);
+        const threshold = SNAP_SCREEN_PX / Math.max(view.scale, 0.000001);
+        const anchorX = fromCenter ? ptr.startTransform.x :
+          (ptr.handle.sx < 0 ? ptr.startBounds.right : ptr.startBounds.left);
+        const anchorY = fromCenter ? ptr.startTransform.y :
+          (ptr.handle.sy < 0 ? ptr.startBounds.bottom : ptr.startBounds.top);
+        const candidates = [];
+
+        function consider(axis, edge, target, anchor, moving) {
+          if (!moving || Math.abs(edge - target) > threshold) return;
+          const factor = (target - anchor) / (edge - anchor);
+          const width = bounds.width * (axis === "x" || !unlockProportions ? factor : 1);
+          const height = bounds.height * (axis === "y" || !unlockProportions ? factor : 1);
+          if (!Number.isFinite(factor) || width < MIN_IMAGE_SIZE || height < MIN_IMAGE_SIZE) return;
+          candidates.push({ axis, factor, distance: Math.abs(edge - target) });
+        }
+
+        consider("x", bounds.left, 0, anchorX, fromCenter || ptr.handle.sx < 0);
+        consider("x", bounds.right, view.art.width, anchorX, fromCenter || ptr.handle.sx > 0);
+        consider("y", bounds.top, 0, anchorY, fromCenter || ptr.handle.sy < 0);
+        consider("y", bounds.bottom, view.art.height, anchorY, fromCenter || ptr.handle.sy > 0);
+        candidates.sort((a, b) => a.distance - b.distance);
+        if (!candidates.length) return;
+
+        // With locked proportions, one scale factor snaps the nearest moving edge.
+        // Free scaling can snap each axis independently. The anchor never moves.
+        const factorX = unlockProportions ? candidates.find(c => c.axis === "x")?.factor ?? 1 : candidates[0].factor;
+        const factorY = unlockProportions ? candidates.find(c => c.axis === "y")?.factor ?? 1 : candidates[0].factor;
+        const width = bounds.width * factorX;
+        const height = bounds.height * factorY;
+        item.transform.scaleX = width / item.naturalWidth;
+        item.transform.scaleY = height / item.naturalHeight;
+        item.transform.x = fromCenter ? anchorX : anchorX + ptr.handle.sx * width / 2;
+        item.transform.y = fromCenter ? anchorY : anchorY + ptr.handle.sy * height / 2;
+      }
+
       function endPointer(event) {
         if (!state.pointer || event.pointerId !== state.pointer.id) return;
-        try { els.canvas.releasePointerCapture(event.pointerId); } catch {}
-        state.pointer = null;
-        els.canvas.classList.remove("dragging");
+        finishPointerEdit();
         const p = pointerPosition(event);
         updateHover(p.x, p.y);
       }
@@ -1510,6 +1646,7 @@
 
         els.emptyState.classList.toggle("hidden", has);
         els.removeBtn.disabled = !has || state.exporting;
+        els.undoBtn.disabled = !state.undoStack.length || state.exporting;
         els.fillBtn.disabled = !has || state.exporting;
         els.fitImageBtn.disabled = !has || state.exporting;
         els.centerBtn.disabled = !has || state.exporting;
@@ -1763,11 +1900,18 @@
       function isTypingTarget(target) {
         return target instanceof HTMLInputElement ||
                target instanceof HTMLSelectElement ||
-               target instanceof HTMLTextAreaElement;
+               target instanceof HTMLTextAreaElement || target.isContentEditable;
       }
 
       function onKeyDown(event) {
         if (isTypingTarget(event.target)) return;
+
+        if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey &&
+            event.key.toLowerCase() === "z") {
+          event.preventDefault();
+          undoEdit();
+          return;
+        }
 
         if (event.code === "Space") {
           state.spaceDown = true;
@@ -1840,6 +1984,7 @@
       });
 
       els.removeBtn.addEventListener("click", removeCurrent);
+      els.undoBtn.addEventListener("click", undoEdit);
       els.ratioSelect.addEventListener("change", handleSettingsChange);
       els.sizeSelect.addEventListener("change", handleSettingsChange);
       els.fillBtn.addEventListener("click", () => resetImage("fill"));
@@ -1890,12 +2035,12 @@
       resizeObserver.observe(els.stageWrap);
 
       window.addEventListener("beforeunload", () => {
-        state.items.forEach(item => URL.revokeObjectURL(item.url));
+        const urls = new Set([
+          ...state.items.map(item => item.url),
+          ...state.undoStack.flatMap(edit => edit.items.map(item => item.url))
+        ]);
+        urls.forEach(url => URL.revokeObjectURL(url));
       });
-
-      if (typeof window.showDirectoryPicker !== "function") {
-        activateBrowserSaveFallback(false);
-      }
 
       resizeCanvas();
       updateUI();
